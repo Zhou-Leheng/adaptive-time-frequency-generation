@@ -82,6 +82,20 @@ Outputs are saved in `benchmark_diffusion_ts` under the existing experiment fold
 
 `training_seconds` and `sampling_seconds` carry each run's recorded timings. Compare timings on matching GPU hardware. The code checks the source CSV hash, saved split boundaries, window counts, and normalization statistics before training the baseline. It locks the source experiment while running the comparison.
 
+## Overlap-output ablation
+
+Open [overlap_colab.ipynb](https://colab.research.google.com/github/Zhou-Leheng/adaptive-time-frequency-generation/blob/main/overlap_colab.ipynb) after completing the original comparison. Select a GPU and run the first three code cells. This trains one new `patch_overlap` model from scratch and evaluates it alongside the existing fixed, global, patch, and Diffusion-TS results.
+
+The only architecture change is the output head in each time expert: input patches and output stride remain 8 points, while each token predicts 16 points with a 4-point halo on each side. Overlapping predictions are combined using a positive Hann taper and normalized by their total coverage at each time position. The frequency expert and patch-constant router are unchanged. Shared parameters start with exactly the same initialization as the original model, and the training random stream is preserved. The central output rows retain their original initialization; the added halo rows receive standard linear-layer initialization. The default model has 243185 parameters, compared with 235905 originally.
+
+The new run inherits the original seed, data selection, normalization, optimizer settings, 5000 training steps, validation selection, and sampling noise bank from `settings.json`. Existing evaluation results and the shared TS2Vec encoder are reused. Only the new sample set needs its DS/PS evaluations. Outputs go to `MyDrive/ATFG/etth1_seed42/overlap_output`, with resumable checkpoints under `patch_overlap`, a five-method `comparison.csv`/`comparison.json`, and `boundary_diagnostics.json`. The original result files remain intact.
+
+The boundary ratio compares the mean absolute adjacent-point change at the original patch boundaries with the mean at other positions. Values near one indicate similar average changes at the two sets of positions. Read this diagnostic alongside generation metrics, within-window variation, and samples to assess whether a change removes boundary artifacts while retaining useful dynamics.
+
+```bash
+python -u run_overlap.py --results results/etth1_seed42 --download
+```
+
 ## Checks
 
 ```bash

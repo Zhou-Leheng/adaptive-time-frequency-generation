@@ -14,6 +14,7 @@ from atfg.diffusion import GaussianDiffusion
 from atfg.upstream import OfficialDiffusionTS
 from compare import compare, parser as comparison_parser
 from run import parser as training_parser, run_experiment
+from run_overlap import parser as overlap_parser, run_overlap
 
 
 torch.set_num_threads(1)
@@ -70,6 +71,24 @@ class BenchmarkTests(unittest.TestCase):
                 compare(args)
             for mode in hashes:
                 self.assertTrue((work / "evaluation" / f"{mode}.json").is_file())
+            source_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                             for path in output.rglob("*") if path.is_file() and path.name != ".run.lock"}
+            overlap_args = overlap_parser().parse_args([
+                "--results", str(output), "--data", str(source), "--device", "cpu",
+            ])
+            run_overlap(overlap_args)
+            overlap_rows = json.loads((output / "overlap_output/comparison.json").read_text())
+            self.assertEqual([row["method"] for row in overlap_rows],
+                             ["fixed", "global", "patch", "diffusion_ts", "patch_overlap"])
+            for row in overlap_rows:
+                self.assertTrue(np.isfinite(row["patch_boundary_ratio"]))
+                self.assertTrue(np.isfinite(row["context_fid"]))
+            for path, before in source_hashes.items():
+                self.assertEqual(before, hashlib.sha256(path.read_bytes()).hexdigest(), str(path))
+            with patch("run_overlap.train_model", side_effect=AssertionError("Unexpected training")), \
+                 patch("run_overlap.evaluate_method", side_effect=AssertionError("Unexpected evaluation")), \
+                 patch("run_overlap.shared_encoder", side_effect=AssertionError("Unexpected encoder fit")):
+                run_overlap(overlap_args)
 
 
 if __name__ == "__main__":
