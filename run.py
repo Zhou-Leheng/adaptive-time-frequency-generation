@@ -71,9 +71,10 @@ def validation_loss(model, diffusion, data, batch_size, seed, device):
     return total / data.numel()
 
 
-def train_model(args, mode, train, validation, configuration, directory, device, stop):
+def train_model(args, mode, train, validation, configuration, directory, device, stop,
+                model_factory=FusionDenoiser):
     set_seed(args.seed)
-    model = FusionDenoiser(
+    model = model_factory(
         length=args.length, channels=train.shape[-1], patch_size=args.patch_size,
         width=args.width, heads=args.heads, layers=args.layers, mode=mode,
     ).to(device)
@@ -121,9 +122,13 @@ def train_model(args, mode, train, validation, configuration, directory, device,
         indices = torch.randint(len(train), (args.batch_size,), generator=batch_generator)
         clean = train[indices].to(device)
         times = torch.randint(diffusion.steps, (len(clean),), device=device)
-        noisy = diffusion.add_noise(clean, times, torch.randn_like(clean))
-        prediction, _ = model(noisy, times)
-        loss = F.mse_loss(prediction, clean)
+        noise = torch.randn_like(clean)
+        if hasattr(model, "training_loss"):
+            loss = model.training_loss(clean, times, noise)
+        else:
+            noisy = diffusion.add_noise(clean, times, noise)
+            prediction, _ = model(noisy, times)
+            loss = F.mse_loss(prediction, clean)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite training loss at step {step + 1}")
         optimizer.zero_grad(set_to_none=True)
@@ -135,7 +140,8 @@ def train_model(args, mode, train, validation, configuration, directory, device,
                 averaged.lerp_(current, 1 - args.ema_decay)
         step += 1
         if step % args.log_every == 0 or step == 1:
-            print(f"{mode} step={step}/{args.steps} train_mse={loss.item():.7f}", flush=True)
+            label = "train_loss" if hasattr(model, "training_loss") else "train_mse"
+            print(f"{mode} step={step}/{args.steps} {label}={loss.item():.7f}", flush=True)
         if step % args.check_every == 0 or step == args.steps:
             val = validation_loss(ema, diffusion, validation, args.batch_size, args.seed + 200, device)
             if not np.isfinite(val):
