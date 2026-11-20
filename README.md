@@ -14,7 +14,7 @@ The implementation uses cosine Gaussian diffusion, predicts the clean sequence, 
 
 ## Colab
 
-Open [colab.ipynb](https://colab.research.google.com/github/Zhou-Leheng/adaptive-time-frequency-generation/blob/main/colab.ipynb) and select a GPU runtime. For this private repository, authorize GitHub when Colab opens the notebook. The first code cell downloads the code using a GitHub token read from the Colab secret `GITHUB_TOKEN`, or from a hidden input prompt. Grant that token repository contents read access.
+Open [colab.ipynb](https://colab.research.google.com/github/Zhou-Leheng/adaptive-time-frequency-generation/blob/main/colab.ipynb) and select a GPU runtime. For this private repository, authorize GitHub when Colab opens the notebook. The first code cell downloads public repository code directly. For a private repository, it reads a GitHub token from the Colab secret `GITHUB_TOKEN`, or from a hidden input prompt. Grant that token repository contents read access.
 
 Run the notebook cells in order. Training starts in the background with `nohup`, so the next cells can read the log and results while it runs. Checkpoints and result files are written to `MyDrive/ATFG/etth1_seed42`. The code and downloaded ETTh1 CSV stay in the Colab runtime.
 
