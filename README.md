@@ -96,6 +96,14 @@ The boundary ratio compares the mean absolute adjacent-point change at the origi
 python -u run_overlap.py --results results/etth1_seed42 --download
 ```
 
+## Three additional unconditional baselines
+
+Open [external_baselines_colab.ipynb](https://colab.research.google.com/github/Zhou-Leheng/adaptive-time-frequency-generation/blob/main/external_baselines_colab.ipynb) after completing the main and overlap comparisons. It trains PaCoDi SDE, FreqDiff, and TimeBridge GP in sequence. The script loads pinned upstream model code and uses each author's denoising objective, optimizer schedule, and sampler. The default pilot uses the existing ETTh1 train and validation windows, seed, batch size, and optimizer-update count. The three samplers use 500, 1000, and 40 solver steps, respectively. These step counts describe different solvers.
+
+PaCoDi draws its inverse instance-normalization statistics from training windows. TimeBridge fits its RBF GP prior using the same training windows and extends the authors' ETTh recipe to length 128. FreqDiff uses the released transformer and VP-SDE configuration with its Fourier noise scaling enabled. The evaluator returns all generated samples to the common z-score scale and reuses the fitted TS2Vec encoder and the same real test windows and metric settings. The combined comparison can include saved Diffusion-TS, patch overlap, and global overlap results. This is a common-data pilot with native objectives and samplers, using a shared short training budget.
+
+Results go to `benchmark_three_baselines` inside the existing experiment directory. The table updates per completed method. Checkpoints and evaluator stages can resume. Install `requirements-external.txt` to run locally, then invoke `python -u run_external.py --results results/etth1_seed42 --download`. Add `--methods pacodi_sde`, `freqdiff`, or `timebridge_gp` to launch a subset. Use a new output name when changing the training budget.
+
 ## Checks
 
 ```bash
