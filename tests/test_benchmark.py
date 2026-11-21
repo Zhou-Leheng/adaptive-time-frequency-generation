@@ -90,6 +90,25 @@ class BenchmarkTests(unittest.TestCase):
                  patch("run_overlap.shared_encoder", side_effect=AssertionError("Unexpected encoder fit")):
                 run_overlap(overlap_args)
 
+            patch_dir = output / "overlap_output"
+            patch_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in patch_dir.rglob("*") if path.is_file()}
+            global_args = overlap_parser().parse_args([
+                "--results", str(output), "--data", str(source), "--device", "cpu", "--mode", "global",
+            ])
+            run_overlap(global_args)
+            routing = output / "overlap_routing"
+            rows = json.loads((routing / "comparison.json").read_text())
+            self.assertEqual([row["method"] for row in rows], ["global_overlap", "patch_overlap"])
+            self.assertEqual(rows[1], overlap_rows[-1])
+            self.assertEqual(rows[0]["parameters"], rows[1]["parameters"])
+            self.assertEqual(rows[0]["trained_steps"], rows[1]["trained_steps"])
+            with np.load(routing / "global_overlap/router_weights.npz") as trace:
+                weights = trace["weights"]
+                np.testing.assert_allclose(weights, np.broadcast_to(weights[:, :, :1], weights.shape))
+            for path, before in patch_hashes.items():
+                self.assertEqual(before, hashlib.sha256(path.read_bytes()).hexdigest(), str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,7 @@ from compare import digest, evaluate_method, load_shared_data, same_protocol, sh
 from run import atomic_json, generate_and_evaluate, train_model
 
 
-METHODS = ("fixed", "global", "patch", "diffusion_ts", "patch_overlap")
+METHODS = ("fixed", "global", "patch", "diffusion_ts", "patch_overlap", "global_overlap")
 
 
 def boundary_diagnostics(values, patch_size):
@@ -34,6 +34,20 @@ def boundary_diagnostics(values, patch_size):
     )
 
 
+def load_reference(samples, metrics, evaluation, method, seed):
+    if not all(path.is_file() for path in (samples, metrics, evaluation)):
+        raise FileNotFoundError(f"Complete the reference evaluation first: {method}")
+    value = json.loads(evaluation.read_text(encoding="utf-8"))
+    samples_sha = digest(samples)
+    if value.get("input_sha") != samples_sha or "summary" not in value:
+        raise ValueError(f"Reference evaluation is incomplete or stale for {method}")
+    if value["summary"]["generator_seed"] != seed:
+        raise ValueError(f"Reference seed differs for {method}")
+    provenance = dict(samples_sha=samples_sha, metrics_sha=digest(metrics),
+                      evaluation_sha=digest(evaluation))
+    return value, provenance
+
+
 def reference_files(root, benchmark, settings):
     paths = {method: (root / method / "samples_normalized.npy", root / method / "metrics.json")
              for method in METHODS[:3]}
@@ -43,23 +57,15 @@ def reference_files(root, benchmark, settings):
     cached = {}
     for method, (samples, metrics) in paths.items():
         evaluation = benchmark / "evaluation" / f"{method}.json"
-        if not all(path.is_file() for path in (samples, metrics, evaluation)):
-            raise FileNotFoundError(f"Finish the original comparison before starting overlap: {method}")
-        value = json.loads(evaluation.read_text(encoding="utf-8"))
-        if value.get("input_sha") != digest(samples) or "summary" not in value:
-            raise ValueError(f"Original evaluation is incomplete or stale for {method}")
-        summary = value["summary"]
-        if summary["generator_seed"] != settings["seed"]:
-            raise ValueError(f"Original seed differs for {method}")
-        cached[method] = value
-        references[method] = dict(samples_sha=digest(samples), metrics_sha=digest(metrics),
-                                  evaluation_sha=digest(evaluation))
+        cached[method], references[method] = load_reference(
+            samples, metrics, evaluation, method, settings["seed"],
+        )
     return paths, cached, references
 
 
-def write_summary(work, cached, diagnostics):
+def write_summary(work, cached, diagnostics, methods):
     rows = []
-    for method in METHODS:
+    for method in methods:
         if method not in cached or "summary" not in cached[method]:
             continue
         row = dict(cached[method]["summary"])
@@ -81,10 +87,17 @@ def write_summary(work, cached, diagnostics):
 
 
 def run_overlap(args):
-    for name in (args.name, args.benchmark_name):
+    method = f"{args.mode}_overlap"
+    compare_routing = args.mode == "global"
+    output_name = args.name or ("overlap_routing" if compare_routing else "overlap_output")
+    methods = ("global_overlap", "patch_overlap") if compare_routing else METHODS[:-1]
+    folder_names = (output_name, args.benchmark_name)
+    if compare_routing:
+        folder_names += (args.patch_reference,)
+    for name in folder_names:
         if Path(name).name != name or name in (".", ".."):
             raise ValueError("Output names must be folder names")
-    if args.name == args.benchmark_name or args.name in METHODS:
+    if len(set(folder_names)) != len(folder_names) or output_name in METHODS:
         raise ValueError("Choose a separate folder for the overlap ablation")
     root = Path(args.results)
     benchmark = root / args.benchmark_name
@@ -107,15 +120,6 @@ def run_overlap(args):
               if args.device == "auto" else torch.device(args.device))
     with FileLock(str(root / ".run.lock"), timeout=0):
         paths, cached, references = reference_files(root, benchmark, settings)
-        for method, value in cached.items():
-            if (value["summary"]["evaluator_repeats"] != evaluation_args.repeats
-                    or len(value["repeats"]) != evaluation_args.repeats
-                    or any("predictive_score" not in row or "discriminative_score" not in row
-                           for row in value["repeats"])):
-                raise ValueError(f"Original evaluator repeats are incomplete for {method}")
-        work = root / args.name
-        work.mkdir(exist_ok=True)
-        (work / "evaluation").mkdir(exist_ok=True)
         protocol = dict(
             source_settings=settings, reference_protocol=original_protocol, reference_files=references,
             shared_encoder_sha=digest(encoder_path), method="patch_overlap",
@@ -125,6 +129,36 @@ def run_overlap(args):
             router="original patch-constant softmax weights", frequency_expert="original unchanged",
             initialization="same shared initial parameters and training RNG; central output rows copied",
         )
+        if compare_routing:
+            patch_reference = root / args.patch_reference
+            patch_protocol = patch_reference / "protocol.json"
+            if not patch_protocol.is_file():
+                raise FileNotFoundError(f"Complete patch_overlap first: {patch_protocol}")
+            if json.loads(patch_protocol.read_text(encoding="utf-8")) != protocol:
+                raise ValueError("The patch_overlap reference uses a different overlap or evaluation protocol")
+            patch_dir = patch_reference / "patch_overlap"
+            patch_paths = (patch_dir / "samples_normalized.npy", patch_dir / "metrics.json")
+            patch_result, patch_provenance = load_reference(
+                *patch_paths, patch_reference / "evaluation/patch_overlap.json", "patch_overlap", settings["seed"],
+            )
+            if patch_result["summary"]["trained_steps"] != settings["steps"]:
+                raise ValueError("The patch_overlap reference uses a different training budget")
+            paths = {"patch_overlap": patch_paths}
+            cached = {"patch_overlap": patch_result}
+            protocol.update(
+                method=method, router="one learned softmax vector per sequence and diffusion step",
+                patch_reference=dict(folder=args.patch_reference, **patch_provenance),
+            )
+        expected_seeds = [settings["seed"] + 1000 + i for i in range(evaluation_args.repeats)]
+        for reference, value in cached.items():
+            if (value["summary"]["evaluator_repeats"] != evaluation_args.repeats
+                    or [row["seed"] for row in value["repeats"]] != expected_seeds
+                    or any("predictive_score" not in row or "discriminative_score" not in row
+                           for row in value["repeats"])):
+                raise ValueError(f"Reference evaluator repeats differ or are incomplete for {reference}")
+        work = root / output_name
+        work.mkdir(exist_ok=True)
+        (work / "evaluation").mkdir(exist_ok=True)
         same_protocol(work / "protocol.json", protocol)
         windows = load_shared_data(args, settings)
         stop = {"requested": False}
@@ -135,49 +169,48 @@ def run_overlap(args):
 
         signal.signal(signal.SIGTERM, request_stop)
         try:
-            directory = work / "patch_overlap"
+            directory = work / method
             directory.mkdir(exist_ok=True)
             samples, metrics = directory / "samples_normalized.npy", directory / "metrics.json"
             if not (samples.is_file() and metrics.is_file()):
                 training_args = SimpleNamespace(**settings, log_every=100)
-                configuration = dict(settings, mode="patch", decoder="overlap_output_v1",
+                configuration = dict(settings, mode=args.mode, decoder="overlap_output_v1",
                                      output_patch_size=2 * settings["patch_size"])
-                print(f"Train patch_overlap from scratch: {settings['steps']} steps on {device}", flush=True)
-                print("Reusing the original data, batches, diffusion settings, and router.", flush=True)
+                print(f"Train {method} from scratch: {settings['steps']} steps on {device}", flush=True)
                 if device.type == "cuda":
                     torch.cuda.reset_peak_memory_stats(device)
                 model, diffusion, training = train_model(
-                    training_args, "patch", torch.from_numpy(windows[0]), torch.from_numpy(windows[1]),
+                    training_args, args.mode, torch.from_numpy(windows[0]), torch.from_numpy(windows[1]),
                     configuration, directory, device, stop, model_factory=OverlapFusionDenoiser,
                 )
                 evaluation = generate_and_evaluate(
                     training_args, model, diffusion, windows[2], directory, device, stop,
                 )
-                result = dict(mode="patch_overlap", seed=settings["seed"], **training, **evaluation,
+                result = dict(mode=method, seed=settings["seed"], **training, **evaluation,
                               peak_gpu_mib=torch.cuda.max_memory_allocated(device) / 2**20
                               if device.type == "cuda" else 0.0)
                 atomic_json(metrics, result)
                 del model, diffusion
             else:
-                print("Skip completed patch_overlap training and sampling", flush=True)
-            paths["patch_overlap"] = (samples, metrics)
+                print(f"Skip completed {method} training and sampling", flush=True)
+            paths[method] = (samples, metrics)
             diagnostics = {
                 "real_train": boundary_diagnostics(windows[0], settings["patch_size"]),
                 "real_test": boundary_diagnostics(windows[2], settings["patch_size"]),
             }
-            for method, (sample_path, _) in paths.items():
+            for label, (sample_path, _) in paths.items():
                 values = np.load(sample_path, allow_pickle=False)
                 expected = (settings["samples"], settings["length"], windows[0].shape[-1])
                 if values.shape != expected or not np.isfinite(values).all():
-                    raise ValueError(f"Invalid sample array for {method}")
-                diagnostics[method] = boundary_diagnostics(values, settings["patch_size"])
+                    raise ValueError(f"Invalid sample array for {label}")
+                diagnostics[label] = boundary_diagnostics(values, settings["patch_size"])
             atomic_json(work / "boundary_diagnostics.json", diagnostics)
-            cache_path = work / "evaluation/patch_overlap.json"
+            cache_path = work / "evaluation" / f"{method}.json"
             current = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
             if current and current.get("input_sha") != digest(samples):
                 raise ValueError("Saved overlap samples changed. Choose a new --name.")
             if "summary" not in current:
-                write_summary(work, cached, diagnostics)
+                write_summary(work, cached, diagnostics, methods)
                 check_stop(stop)
                 minimum, span = fit_metric_scaler(windows[0])
                 train_scaled = ((windows[0] - minimum) / span).astype(np.float32)
@@ -185,16 +218,17 @@ def run_overlap(args):
                 encoder = shared_encoder(train_scaled, benchmark, evaluation_args,
                                          settings["seed"] + 500, device, stop)
                 features = encoder.encode(real_scaled, encoding_window="full_series", batch_size=32)
-                evaluate_method("patch_overlap", paths["patch_overlap"], real_scaled, (minimum, span),
+                evaluate_method(method, paths[method], real_scaled, (minimum, span),
                                 encoder, features, evaluation_args, settings, work, device, stop)
                 current = json.loads(cache_path.read_text(encoding="utf-8"))
             else:
-                print("Skip completed patch_overlap evaluation", flush=True)
-            cached["patch_overlap"] = current
-            write_summary(work, cached, diagnostics)
-            old = diagnostics["patch"]["patch_boundary_ratio"]
-            new = diagnostics["patch_overlap"]["patch_boundary_ratio"]
-            print(f"Patch boundary ratio: original={old}, overlap={new}", flush=True)
+                print(f"Skip completed {method} evaluation", flush=True)
+            cached[method] = current
+            write_summary(work, cached, diagnostics, methods)
+            reference = "patch_overlap" if compare_routing else "patch"
+            before = diagnostics[reference]["patch_boundary_ratio"]
+            after = diagnostics[method]["patch_boundary_ratio"]
+            print(f"Patch boundary ratio: {reference}={before}, {method}={after}", flush=True)
             print(f"Finished overlap comparison: {work / 'comparison.csv'}", flush=True)
         finally:
             signal.signal(signal.SIGTERM, previous)
@@ -203,7 +237,9 @@ def run_overlap(args):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--results", required=True, help="Completed original fusion experiment folder")
-    result.add_argument("--name", default="overlap_output")
+    result.add_argument("--mode", choices=("patch", "global"), default="patch")
+    result.add_argument("--name", help="Output folder (default overlap_output or overlap_routing)")
+    result.add_argument("--patch-reference", default="overlap_output", help="Completed patch_overlap for global mode")
     result.add_argument("--benchmark-name", default="benchmark_diffusion_ts")
     result.add_argument("--data", default="data/ETTh1.csv")
     result.add_argument("--download", action="store_true")
